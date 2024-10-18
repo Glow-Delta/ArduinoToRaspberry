@@ -314,6 +314,17 @@ int average(int sensorIndex) {
   return sum / 5; // Return the average
 }
 
+int getAmountOfActivatedSensors() {
+  int amountOfActivatedSensors = 0;
+  
+  for (int i = 0; i < 8; i++) {
+    if (average(i) < 150) {
+      amountOfActivatedSensors++;
+    }
+  }
+  return amountOfActivatedSensors;
+}
+
 
 
 
