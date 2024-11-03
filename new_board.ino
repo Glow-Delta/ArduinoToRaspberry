@@ -32,177 +32,131 @@
 #define SENSOR_COUNT_A 8
 #define SENSOR_COUNT_B 8
 
-volatile bool interupted;
-unsigned long risingA = 0;
-unsigned long travelTimeA = 0;
+#define TIMEOUT_TIME 50000 //in microseconds when to timeout a sensor and continue to the next
 
-const uint8_t sensorPinsA[SENSOR_COUNT_A] = {0b00000001, 0b00000010, 0b00000100, 0b00001000, 0b00010000, 0b00100000, 0b01000000, 0b10000000};
+const int totalSensorCount = SENSOR_COUNT_A + SENSOR_COUNT_B;
 
-int lastTriggeredSensorA = 0;
-bool sensorTriggeredA = false;
-unsigned long lastSensorTriggerTimeA = 0;
+volatile unsigned long interuptTime = 0;
+unsigned long rising = 0;
+unsigned long lastSensorTriggerTime = 0;
+int lastTriggeredSensor = 0;
+bool sensorTriggered = false;
 
-unsigned long risingB = 0;
-unsigned long travelTimeB = 0;
+const uint8_t sensorPins[SENSOR_COUNT_A] = {0b00000001, 0b00000010, 0b00000100, 0b00001000, 0b00010000, 0b00100000, 0b01000000, 0b10000000};
 
-const uint8_t sensorPinsB[SENSOR_COUNT_B] = {0b00000001, 0b00000010, 0b00000100, 0b00001000, 0b00010000, 0b00100000, 0b01000000, 0b10000000};
+int distances[SENSOR_COUNT_A + SENSOR_COUNT_B];
 
-int lastTriggeredSensorB = 0;
-bool sensorTriggeredB = false;
-unsigned long lastSensorTriggerTimeB = 0;
+void setup() {
+  Serial.begin(9600);
 
-int distances[SENSOR_COUNT_A + SENSOR_COUNT_A];
+  Wire.begin();
+  Wire.setClock(400000);  // Set I²C speed to 400kHz
 
-bool ASide = false;
+  pinMode(7, INPUT_PULLUP);     // Pro Micro pin 7 for INTA (interrupt pin), with internal pull-up
 
-void checkForInterupt(unsigned long now) {
-  if (ASide = true) {
-    if (!sensorTriggeredA) {
-      triggerNextUltrasonicA();
-    }
-    else if (interupted) {
-      readRegisterA(INTCAPA);
-      interupted = false;
+  setupMCP23017();
 
-      if (risingA == 0) {
-        risingA = now;
-      }
-      else {
-        travelTimeA = now - risingA;
-        sensorTriggeredA = false;
-        ASide = false;
-      }
-    }
-    else if (now - lastSensorTriggerTimeA > 50000) {
-      ASide = false;
-      readRegisterA(INTCAPA);
-      triggerNextUltrasonicA();
-    }
-  }
-  else {
-    if (!sensorTriggeredB) {
-      triggerNextUltrasonicB();
-    }
-    else if (interupted) {
-      readRegisterB(INTCAPA);
-      interupted = false;
+  attachInterrupt(digitalPinToInterrupt(7), handleInterrupt, CHANGE);  // Trigger on CHANGE (INTA goes LOW or HIGH)
+}
 
-      if (risingB == 0) {
-        risingB = now;
-      }
-      else {
-        travelTimeB = now - risingB;
-        sensorTriggeredB = false;
-        //ASide = true;
-      }
-    }
-    else if (now - lastSensorTriggerTimeB > 50000) {
-      //ASide = true;
-      readRegisterB(INTCAPA);
-      triggerNextUltrasonicB();
-    }
-  }
+void loop() {
+
+  handleSensorLogic();
+
+  printDistances(distances);
 }
 
 // Function to configure MCP23017 registers for GPA7 (echo) and GPB0 (trigger)
 void setupMCP23017() {
   // Set GPB0 as output (trigger) and GPA7 as input (echo)
-  writeRegisterA(IODIRA, 0b11111111);  // IODIRA: 1 = input for GPA7 (echo)
-  writeRegisterA(IODIRB, 0b00000000);  // IODIRB: 0 = output for GPB0 (trigger)
-  writeRegisterB(IODIRA, 0b11111111);  // IODIRA: 1 = input for GPA7 (echo)
-  writeRegisterB(IODIRB, 0b00000000);  // IODIRB: 0 = output for GPB0 (trigger)
+  writeRegister(IODIRA, 0b11111111, MCP23017_ADDRESS_A);  // IODIRA: 1 = input for GPA7 (echo)
+  writeRegister(IODIRB, 0b00000000, MCP23017_ADDRESS_A);  // IODIRB: 0 = output for GPB0 (trigger)
+  writeRegister(IODIRA, 0b11111111, MCP23017_ADDRESS_B);  // IODIRA: 1 = input for GPA7 (echo)
+  writeRegister(IODIRB, 0b00000000, MCP23017_ADDRESS_B);  // IODIRB: 0 = output for GPB0 (trigger)
 
   // Enable interrupt on GPA7 (echo pin)
-  writeRegisterA(GPINTENA, 0b11111111);  // GPINTENA: Enable interrupt on GPA7 (echo)
-  writeRegisterB(GPINTENA, 0b11111111);  // GPINTENA: Enable interrupt on GPA7 (echo)
+  writeRegister(GPINTENA, 0b11111111, MCP23017_ADDRESS_A);  // GPINTENA: Enable interrupt on GPA7 (echo)
+  writeRegister(GPINTENA, 0b11111111, MCP23017_ADDRESS_B);  // GPINTENA: Enable interrupt on GPA7 (echo)
   
   // Set interrupt-on-change to trigger on any change (both rising and falling edge) for GPA7
-  writeRegisterA(INTCONA, 0b00000000);  // INTCONA: 0 = compare to previous value (interrupt on any change)
-  writeRegisterB(INTCONA, 0b00000000);  // INTCONA: 0 = compare to previous value (interrupt on any change)
+  writeRegister(INTCONA, 0b00000000, MCP23017_ADDRESS_A);  // INTCONA: 0 = compare to previous value (interrupt on any change)
+  writeRegister(INTCONA, 0b00000000, MCP23017_ADDRESS_B);  // INTCONA: 0 = compare to previous value (interrupt on any change)
 
-  writeRegisterA(DEFVALA, 0b11111111); // DEFVALA: 1 = high
-  writeRegisterA(DEFVALB, 0b00000000); // DEFVALB: 0 = low
-  writeRegisterB(DEFVALA, 0b11111111); // DEFVALA: 1 = high
-  writeRegisterB(DEFVALB, 0b00000000); // DEFVALB: 0 = low
+  writeRegister(DEFVALA, 0b11111111, MCP23017_ADDRESS_A); // DEFVALA: 1 = high
+  writeRegister(DEFVALB, 0b00000000, MCP23017_ADDRESS_A); // DEFVALB: 0 = low
+  writeRegister(DEFVALA, 0b11111111, MCP23017_ADDRESS_B); // DEFVALA: 1 = high
+  writeRegister(DEFVALB, 0b00000000, MCP23017_ADDRESS_B); // DEFVALB: 0 = low
 
   // Enable pull-up resistor on GPA7 (echo)
-  writeRegisterA(GPPUA, 0b11111111);  // GPPUA: 1 = pull-up enabled on GPA7 (echo)
-  writeRegisterA(GPPUB, 0b11111111);  // GPPUB: 1 = pull-up enabled on GPA7 (echo)
-  writeRegisterB(GPPUA, 0b11111111);  // GPPUA: 1 = pull-up enabled on GPA7 (echo)
-  writeRegisterB(GPPUB, 0b11111111);  // GPPUB: 1 = pull-up enabled on GPA7 (echo)
+  writeRegister(GPPUA, 0b11111111, MCP23017_ADDRESS_A);  // GPPUA: 1 = pull-up enabled on GPA7 (echo)
+  writeRegister(GPPUB, 0b11111111, MCP23017_ADDRESS_A);  // GPPUB: 1 = pull-up enabled on GPA7 (echo)
+  writeRegister(GPPUA, 0b11111111, MCP23017_ADDRESS_B);  // GPPUA: 1 = pull-up enabled on GPA7 (echo)
+  writeRegister(GPPUB, 0b11111111, MCP23017_ADDRESS_B);  // GPPUB: 1 = pull-up enabled on GPA7 (echo)
   
   // Clear any pending interrupts (optional)
-  readRegisterA(0x12);  // GPIOA: Read to clear any existing interrupt flags for Port A
-  readRegisterB(0x12);  // GPIOA: Read to clear any existing interrupt flags for Port A
+  readRegister(GPIOA, MCP23017_ADDRESS_A);  // GPIOA: Read to clear any existing interrupt flags for Port A
+  readRegister(GPIOA, MCP23017_ADDRESS_B);  // GPIOA: Read to clear any existing interrupt flags for Port A
+}
+
+void handleSensorLogic() {
+  if (!sensorTriggered) {
+    triggerNextUltrasonic();
+  }
+  else if (interuptTime != 0) {
+    if (rising = 0) {
+      rising = interuptTime;
+      interuptTime = 0;
+    }
+    else {
+      int distanceCm = (interuptTime - rising) *  0.017;
+
+      // handle noise here
+
+      //
+
+      distances[lastTriggeredSensor] = distanceCm;
+    }
+  }
+  else if (micros() - lastSensorTriggerTime > TIMEOUT_TIME) {
+    triggerNextUltrasonic();
+  }
 }
 
 // Function to trigger the ultrasonic sensor for chip A
-void triggerNextUltrasonicA() {
+void triggerNextUltrasonic() {
   //Serial.print("triggering sensor: ");
   //Serial.println(index);
   // Record the time the trigger pulse was sent
-  risingA = 0;
-  travelTimeA = 0;
-  interupted = false;
-  sensorTriggeredA = true;
-  lastSensorTriggerTimeA = micros();
+  rising = 0;
+  interuptTime = 0;
+  sensorTriggered = true;
 
-  int ultrasonicToTrigger = (lastTriggeredSensorA + 1) % SENSOR_COUNT_A;
-  lastTriggeredSensorA = ultrasonicToTrigger;
+  int nextSensor = (lastTriggeredSensor + 1) % totalSensorCount;
+  uint8_t address = MCP23017_ADDRESS_A;
+  int index = nextSensor;
 
-  //Serial.print("triggering A: ");
-  //Serial.println(ultrasonicToTrigger);
+  if (nextSensor >= SENSOR_COUNT_A) {
+    address = MCP23017_ADDRESS_B;
+    index = nextSensor - SENSOR_COUNT_A;
+  }
 
-  
-  Wire.beginTransmission(MCP23017_ADDRESS_A);
+  Wire.beginTransmission(address);
   Wire.write(GPIOB);
-  Wire.write(sensorPinsA[ultrasonicToTrigger]);
+  Wire.write(sensorPins[index]);
   
   delayMicroseconds(10);  // Delay for 10 microseconds
 
   Wire.write(GPIOB);
   Wire.write(0b00000000);
   Wire.endTransmission();
-}
-// Function to trigger the ultrasonic sensor for chip B
-void triggerNextUltrasonicB() {
-  //Serial.print("triggering sensor: ");
-  //Serial.println(index);
-  // Record the time the trigger pulse was sent
-  risingB = 0;
-  travelTimeB = 0;
-  interupted = false;
-  sensorTriggeredB = true;
-  lastSensorTriggerTimeB = micros();
 
-  int ultrasonicToTrigger = (lastTriggeredSensorB + 1) % SENSOR_COUNT_B;
-  lastTriggeredSensorB = ultrasonicToTrigger;
-
-  //Serial.print("triggering B: ");
-  //Serial.println(ultrasonicToTrigger);
-
-  
-  Wire.beginTransmission(MCP23017_ADDRESS_B);
-  Wire.write(GPIOB);
-  Wire.write(sensorPinsB[ultrasonicToTrigger]);
-  
-  delayMicroseconds(10);  // Delay for 10 microseconds
-
-  Wire.write(GPIOB);
-  Wire.write(0b00000000);
-  Wire.endTransmission();
+  lastSensorTriggerTime = micros();
+  lastTriggeredSensor = nextSensor;
 }
 
 // Function to write to MCP23017 register
-void writeRegisterA(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(MCP23017_ADDRESS_A);
-  Wire.write(reg);
-  Wire.write(value);
-  Wire.endTransmission();
-}
-// Function to write to MCP23017 register
-void writeRegisterB(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(MCP23017_ADDRESS_B);
+void writeRegister(uint8_t reg, uint8_t value, int address) {
+  Wire.beginTransmission(address);
   Wire.write(reg);
   Wire.write(value);
   Wire.endTransmission();
@@ -210,28 +164,19 @@ void writeRegisterB(uint8_t reg, uint8_t value) {
 
 
 // Function to read from MCP23017 register
-uint8_t readRegisterA(uint8_t reg) {
-  Wire.beginTransmission(MCP23017_ADDRESS_A);
+uint8_t readRegister(uint8_t reg, int address) {
+  Wire.beginTransmission(address);
   Wire.write(reg);
   Wire.endTransmission();
   
-  Wire.requestFrom(MCP23017_ADDRESS_A, 1);
-  return Wire.read();
-}
-// Function to read from MCP23017 register
-uint8_t readRegisterB(uint8_t reg) {
-  Wire.beginTransmission(MCP23017_ADDRESS_B);
-  Wire.write(reg);
-  Wire.endTransmission();
-  
-  Wire.requestFrom(MCP23017_ADDRESS_B, 1);
+  Wire.requestFrom(address, 1);
   return Wire.read();
 }
 
 // Function that will be called when an interrupt occurs
 void handleInterrupt() {
   //Serial.println("interupt");
-  interupted = true;
+  interuptTime = micros();
 }
 
 void printDistances(int distances[]) {
@@ -245,54 +190,3 @@ void printDistances(int distances[]) {
   }
   Serial.println("]");  // Close the array with a bracket and move to the next line
 }
-
-void setup() {
-  Wire.begin();
-  Wire.setClock(400000);  // Set I²C speed to 400kHz
-
-  pinMode(7, INPUT_PULLUP);     // Arduino pin 2 for INTA (interrupt pin), with internal pull-up
-  //pinMode(3, INPUT_PULLUP);     // Arduino pin 2 for INTA (interrupt pin), with internal pull-up
-
-  setupMCP23017();
-
-  //Attach interrupt to pin 3 (INTA)
-  attachInterrupt(digitalPinToInterrupt(7), handleInterrupt, CHANGE);  // Trigger on CHANGE (INTA goes LOW)
-  //attachInterrupt(digitalPinToInterrupt(3), handleInterruptB, CHANGE);  // Trigger on CHANGE (INTA goes LOW)
-
-  interupted = false;
-  //interuptedB = false;
-}
-
-void loop() {
-  unsigned long now = micros();
-
-  printDistances(distances);
-
-  checkForInterupt(now);
-  //checkForInteruptsB(now);
-  
-  //TODO handel the travel times
-  if (travelTimeA != 0) {
-    int distanceCm = travelTimeA *  0.034 / 2;
-    if (distanceCm < 250) {
-      distances[lastTriggeredSensorA] = distanceCm;
-    }
-  }
-
-  if (travelTimeB != 0) {
-    int distanceCm = travelTimeB *  0.034 / 2;
-    if (distanceCm < 250) {
-      distances[lastTriggeredSensorA + SENSOR_COUNT_A] = distanceCm;
-    }
-  }
-}
-
-
-
-
-
-
-
-
-
-
